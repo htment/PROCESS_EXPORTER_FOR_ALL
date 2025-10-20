@@ -18,3 +18,9 @@ Automatically installs Process Exporter for Prometheus with architecture detecti
 - hosts: all
   roles:
     - process_exporter
+```
+## Запуск 
+
+```
+ansible-playbook -i inventory playbook.yml --limit zm
+```
