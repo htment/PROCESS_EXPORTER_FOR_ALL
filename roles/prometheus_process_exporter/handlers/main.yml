@@ -1,0 +1,9 @@
+- name: перезапустить process_exporter
+  systemd:
+    name: process_exporter
+    state: restarted
+
+- name: перезагрузить process_exporter
+  systemd:
+    name: process_exporter
+    daemon_reload: yes

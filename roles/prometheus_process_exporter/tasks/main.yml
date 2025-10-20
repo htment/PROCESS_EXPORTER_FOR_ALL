@@ -1,0 +1,181 @@
+- name: Определить архитектуру системы
+  shell: |
+    ARCH=$(uname -m)
+    case $ARCH in
+      x86_64) echo "amd64" ;;
+      i686|i386) echo "386" ;;
+      aarch64) echo "arm64" ;;
+      armv7l) echo "armv7" ;;
+      *) echo "unknown" ;;
+    esac
+  register: arch_result
+  changed_when: false
+
+- name: Установить переменную архитектуры
+  set_fact:
+    process_arch: "{{ arch_result.stdout }}"
+
+- name: Завершить если архитектура не поддерживается
+  fail:
+    msg: "Неподдерживаемая архитектура: {{ arch_result.stdout }}. Поддерживаемые: x86_64, i686, i386, aarch64, armv7l"
+  when: process_arch == "unknown"
+
+- name: Установить URL для скачивания по архитектуре
+  set_fact:
+    process_exporter_url: "https://github.com/ncabatoff/process-exporter/releases/download/v{{ process_exporter_version }}/process-exporter-{{ process_exporter_version }}.linux-{{ process_arch }}.tar.gz"
+
+- name: Вывести информацию об архитектуре
+  debug:
+    msg: 
+      - "Обнаружена архитектура: {{ process_arch }}"
+      - "Версия: {{ process_exporter_version }}"
+      - "URL для скачивания: {{ process_exporter_url }}"
+
+- name: Скачать Process Exporter
+  get_url:
+    url: "{{ process_exporter_url }}"
+    dest: "/tmp/process-exporter-{{ process_exporter_version }}.tar.gz"
+    timeout: 30
+  register: download_result
+  until: download_result is succeeded
+  retries: 3
+  delay: 5
+
+- name: Создать группу для process_exporter
+  group:
+    name: "{{ process_exporter_group }}"
+    state: present
+
+- name: Создать пользователя для process_exporter
+  user:
+    name: "{{ process_exporter_user }}"
+    group: "{{ process_exporter_group }}"
+    shell: /bin/false
+    system: true
+    create_home: false
+
+- name: Создать директорию для Process Exporter
+  file:
+    path: /etc/process_exporter
+    state: directory
+    owner: "{{ process_exporter_user }}"
+    group: "{{ process_exporter_group }}"
+    mode: '0755'
+
+- name: Распаковать Process Exporter
+  unarchive:
+    src: "/tmp/process-exporter-{{ process_exporter_version }}.tar.gz"
+    dest: /tmp/
+    remote_src: yes
+    owner: "{{ process_exporter_user }}"
+    group: "{{ process_exporter_group }}"
+
+- name: Найти распакованную директорию
+  find:
+    paths: /tmp
+    patterns: "process-exporter*"
+    file_type: directory
+  register: unpacked_dir
+
+- name: Вывести информацию о распакованной директории
+  debug:
+    var: unpacked_dir.files
+
+- name: Установить факт распакованной директории
+  set_fact:
+    unpacked_directory: "{{ unpacked_dir.files[0].path }}"
+  when: unpacked_dir.files|length > 0
+
+- name: Завершить если директория не найдена
+  fail:
+    msg: "Не удалось найти распакованную директорию Process Exporter"
+  when: unpacked_dir.files|length == 0
+
+- name: Проверить существование бинарника
+  stat:
+    path: "{{ unpacked_directory }}/process-exporter"
+  register: binary_stat
+
+- name: Вывести путь к бинарнику
+  debug:
+    var: binary_stat.stat.exists
+
+- name: Скопировать бинарник Process Exporter
+  copy:
+    src: "{{ unpacked_directory }}/process-exporter"
+    dest: "/usr/bin/process-exporter"
+    owner: "{{ process_exporter_user }}"
+    group: "{{ process_exporter_group }}"
+    mode: '0755'
+    remote_src: yes
+
+- name: Создать конфигурационный файл Process Exporter
+  copy:
+    dest: "{{ process_exporter_config_file }}"
+    content: |
+      process_names:
+        - name: "{{ '{{' }}.Comm{{ '}}' }}"
+          cmdline:
+          - '.+'
+    owner: "{{ process_exporter_user }}"
+    group: "{{ process_exporter_group }}"
+    mode: '0644'
+
+- name: Создать systemd службу для Process Exporter
+  copy:
+    dest: "{{ process_exporter_service_file }}"
+    content: |
+      [Unit]
+      Description=Process Exporter for Prometheus
+      Documentation=https://github.com/ncabatoff/process-exporter
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      User={{ process_exporter_user }}
+      Group={{ process_exporter_group }}
+      Type=simple
+      Restart=on-failure
+      ExecStart=/usr/bin/process-exporter --config.path {{ process_exporter_config_file }} --web.listen-address=:9256
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+
+- name: Перезагрузить systemd для распознания новой службы
+  systemd:
+    daemon_reload: yes
+
+- name: Запустить службу Process Exporter
+  systemd:
+    name: process_exporter
+    state: started
+    enabled: true
+
+- name: Подождать запуска службы
+  wait_for:
+    port: 9256
+    host: 127.0.0.1
+    timeout: 30
+  become: false
+
+- name: Проверить работоспособность Process Exporter
+  uri:
+    url: http://localhost:9256/metrics
+    method: GET
+    status_code: 200
+  register: http_result
+  become: false
+  failed_when: http_result.status != 200
+
+- name: Вывести сообщение об успехе
+  debug:
+    msg: "Process Exporter успешно установлен и работает на порту 9256. Архитектура: {{ process_arch }}"
+
+- name: Очистить установочные файлы
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/process-exporter-{{ process_exporter_version }}.tar.gz"
+    - "{{ unpacked_directory }}"

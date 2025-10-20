@@ -1,0 +1,5 @@
+process_exporter_version: "0.8.5"
+process_exporter_user: "process_exporter"
+process_exporter_group: "process_exporter"
+process_exporter_service_file: "/etc/systemd/system/process_exporter.service"
+process_exporter_config_file: "/etc/process_exporter/process-exporter.yaml"
